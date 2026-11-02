@@ -1,0 +1,154 @@
+name: Windows comments test installer
+
+on:
+  push:
+    branches: [feat/local-typst-comments]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-comments-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-installer:
+    name: Build and test Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install the pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+
+      - name: Cache native dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> src-tauri/target
+          shared-key: windows-comments-test
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate translations
+        run: |
+          pnpm i18n:types:check
+          pnpm i18n:validate
+
+      - name: Test personal comments and editor integration
+        run: >-
+          pnpm exec vitest run --maxWorkers=2
+          src/features/personal-comments
+          src/lib/personal-comments-flush.test.ts
+          src/components/collab/CommentsSlots.test.tsx
+          src/lib/quit-flush.test.tsx
+          src/lib/update-install-guard.test.ts
+          src/components/collab/comments-rail.test.ts
+          src/components/editor/CodeMirrorEditor.comments.test.tsx
+
+      - name: Typecheck and build the frontend
+        run: pnpm build
+
+      - name: Fetch checksum-pinned document compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/fetch-tectonic.sh x86_64-pc-windows-msvc
+          bash scripts/fetch-biber.sh x86_64-pc-windows-msvc
+          bash scripts/fetch-pandoc.sh x86_64-pc-windows-msvc
+          bash scripts/fetch-typst.sh x86_64-pc-windows-msvc
+
+      - name: Stage the Tinymist resource archive
+        run: node scripts/fetch-language-servers.mjs --server tinymist --target x86_64-pc-windows-msvc --install-mode resource
+
+      - name: Stage the Microsoft VC++ runtime
+        run: node scripts/stage-windows-vcruntime.mjs
+
+      - name: Smoke-test the Typst compiler
+        shell: bash
+        run: bash scripts/smoke-typst.sh x86_64-pc-windows-msvc
+
+      - name: Test native personal comment persistence
+        env:
+          OLEAFLY_EMBED_TEST_MANIFEST: "1"
+        run: cargo test --locked --release -p oleafly --lib local_comments::tests
+
+      # An unsigned test installer needs no signing secrets. Do not create a
+      # release or an update feed; this is an Actions download for this branch.
+      - name: Configure the test installer
+        shell: pwsh
+        run: |
+          $config = @{
+            build = @{ beforeBuildCommand = $null }
+            bundle = @{ createUpdaterArtifacts = $false }
+          }
+          $config | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 src-tauri/tauri.windows-test.conf.json
+
+      - name: Build the Windows setup executable
+        run: pnpm tauri build --bundles nsis --config src-tauri/tauri.windows-test.conf.json
+
+      - name: Prepare download and checksums
+        shell: pwsh
+        env:
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force windows-test-download | Out-Null
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -eq 0) { throw 'The build did not produce a Windows installer.' }
+          foreach ($installer in $installers) {
+            Copy-Item -LiteralPath $installer.FullName -Destination windows-test-download
+            $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($installer.Name)" | Add-Content -Encoding utf8 windows-test-download/SHA256SUMS.txt
+          }
+          @(
+            'Oleafly: Windows-Testversion mit persoenlichen Kommentaren'
+            "Quellstand: $env:BUILD_SHA"
+            ''
+            '1. ZIP-Datei vollstaendig entpacken.'
+            '2. Oleafly schliessen und die Datei mit der Endung -setup.exe starten.'
+            '3. Im Typst-Quelltext Text markieren und Kommentar hinzufuegen waehlen.'
+            ''
+            'Diese Testversion ist nicht vom offiziellen Oleafly-Herausgeber signiert.'
+            'Sie ersetzt Oleafly am ausgewaehlten Installationsort.'
+            'Persoenliche Notizen werden lokal gespeichert und nicht ins PDF geschrieben.'
+          ) | Set-Content -Encoding utf8 windows-test-download/README.txt
+
+      - name: Upload the Windows test installer
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: Oleafly-comments-windows-x64
+          path: windows-test-download/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show the download link
+        shell: pwsh
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          @(
+            '## Windows-Testversion herunterladen'
+            ''
+            "[Download: Oleafly mit persoenlichen Kommentaren]($env:ARTIFACT_URL)"
+            ''
+            'ZIP entpacken, Oleafly schliessen und die enthaltene -setup.exe starten.'
+            ''
+            "Quellstand: $env:BUILD_SHA"
+          ) | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
