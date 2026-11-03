@@ -148,9 +148,12 @@ pub async fn texpile_comments(project_id: String, events: Option<Vec<serde_json:
             return Err("Texpile comments exceed the size limit".into());
         }
         if let Some(events) = events {
-            let id = events.first().and_then(|event| event["id"].as_str()).ok_or("Missing comment ID")?;
-            let exists = log.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .any(|event| event["t"] == "open" && event["id"].as_str() == Some(id));
+            let first = events.first().ok_or("Missing comment event")?;
+            let exists = first["id"].as_str().is_some_and(|id| {
+                log.lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|event| event["t"] == first["t"] && event["id"].as_str() == Some(id))
+            });
             if !exists {
                 let mut append = String::new();
                 if !log.is_empty() && !log.ends_with('\n') {

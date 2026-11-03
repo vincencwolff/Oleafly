@@ -1,3 +1,4 @@
+import { Pencil, Trash2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { loadTypstParser } from "@oleafly/editor/typst";
 import { useEffect, useState } from "react";
@@ -17,6 +18,7 @@ export function PortableComments() {
   const [result, setResult] = useState<{ projectId: string; log: string }>();
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<{ id: string; body: string }>();
   const [parsed, setParsed] = useState<{ source: string; comments: string[] }>();
 
   useEffect(() => {
@@ -66,6 +68,26 @@ export function PortableComments() {
     };
   }, [path, source]);
 
+  async function save(events: object[]) {
+    if (!projectId || busy) return false;
+    setBusy(true);
+    try {
+      const log = await invoke<string>("texpile_comments", { projectId, events });
+      if (typeof log !== "string") throw new Error("Invalid Texpile comment log");
+      setResult({ projectId, log });
+      setError(false);
+      return true;
+    } catch {
+      setError(true);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function append(event: object) {
+    return save([{ v: 1, at: new Date().toISOString(), by: "Oleafly", ...event }]);
+  }
   const threads = result && result.projectId === projectId ? readTexpileComments(result.log) : [];
   const exported = new Set(threads.map(([id]) => id));
   const sourceComments =
@@ -93,10 +115,94 @@ export function PortableComments() {
               <blockquote className="whitespace-pre-wrap break-words">{thread.quote}</blockquote>
             )}
             {[...thread.messages].map(([messageId, message]) => (
-              <p key={messageId} className="whitespace-pre-wrap break-words">
-                <strong>{message.author}</strong> {message.body}
-              </p>
+              <div key={messageId} className="space-y-1">
+                <div className="flex items-center justify-between gap-1">
+                  <strong>{message.author}</strong>
+                  <div className="flex">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6"
+                      disabled={busy}
+                      aria-label={german ? "Kommentar bearbeiten" : "Edit comment"}
+                      onClick={() => setEditing({ id: messageId, body: message.body })}
+                    >
+                      <Pencil />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6"
+                      disabled={busy}
+                      aria-label={german ? "Kommentar löschen" : "Delete comment"}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            german
+                              ? "Kommentar im gemeinsamen Projekt löschen?"
+                              : "Delete this comment from the shared project?",
+                          )
+                        ) {
+                          void append({ t: "delete-message", message: messageId });
+                        }
+                      }}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </div>
+                {editing?.id === messageId ? (
+                  <form
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (
+                        editing.body.trim() &&
+                        (await append({ t: "edit", message: messageId, body: editing.body.trim() }))
+                      ) {
+                        setEditing(undefined);
+                      }
+                    }}
+                  >
+                    <textarea
+                      className="w-full rounded border bg-transparent p-1"
+                      aria-label={german ? "Kommentartext" : "Comment text"}
+                      value={editing.body}
+                      onChange={(event) => setEditing({ id: messageId, body: event.target.value })}
+                    />
+                    <Button size="sm" type="submit" disabled={busy || !editing.body.trim()}>
+                      {german ? "Speichern" : "Save"}
+                    </Button>
+                    <Button size="sm" variant="ghost" type="button" onClick={() => setEditing(undefined)}>
+                      {german ? "Abbrechen" : "Cancel"}
+                    </Button>
+                  </form>
+                ) : (
+                  <p className="whitespace-pre-wrap break-words">{message.body}</p>
+                )}
+              </div>
             ))}
+            <form
+              className="flex items-end gap-1"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                const form = event.currentTarget;
+                const body = String(new FormData(form).get("reply") ?? "").trim();
+                if (body && (await append({ t: "reply", thread: id, id: crypto.randomUUID(), body })))
+                  form.reset();
+              }}
+            >
+              <textarea
+                required
+                name="reply"
+                rows={1}
+                className="min-w-0 flex-1 rounded border bg-transparent p-1"
+                aria-label={german ? "Antworttext" : "Reply text"}
+                placeholder={german ? "Antwort schreiben" : "Write a reply"}
+              />
+              <Button size="sm" type="submit" disabled={busy}>
+                {german ? "Antworten" : "Reply"}
+              </Button>
+            </form>
           </article>
         ))}
       {files.flatMap((file) =>
@@ -108,23 +214,7 @@ export function PortableComments() {
                 size="sm"
                 variant="outline"
                 disabled={!projectId || busy}
-                onClick={async () => {
-                  if (!projectId) return;
-                  setBusy(true);
-                  try {
-                    const log = await invoke<string>("texpile_comments", {
-                      projectId,
-                      events: texpileEvents(file, note),
-                    });
-                    if (typeof log !== "string") throw new Error("Invalid Texpile comment log");
-                    setResult({ projectId, log });
-                    setError(false);
-                  } catch {
-                    setError(true);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+                onClick={() => void save(texpileEvents(file, note))}
               >
                 {german ? "Für Texpile kopieren" : "Copy for Texpile"} — {note.body.slice(0, 80)}
               </Button>
