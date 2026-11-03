@@ -1138,6 +1138,7 @@ pub fn run() {
             chats::load_project_chats,
             chats::save_project_chats,
             local_comments::personal_comments_load,
+            local_comments::texpile_comments,
             local_comments::personal_comments_save,
             git::git_is_initialized,
             git::git_initialize,

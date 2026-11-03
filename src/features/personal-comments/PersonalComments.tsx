@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import type { CollabCommentMember } from "@/lib/tauri";
 import { CommentComposer } from "@/features/collab/comments/CommentComposer";
 import { CommentQuote } from "@/features/collab/comments/CommentQuote";
+import { PortableComments } from "./PortableComments";
 import type { PersonalComment } from "./model";
 import {
   cancelPersonalDraft,
@@ -218,6 +219,7 @@ export function PersonalCommentsPane() {
             </li>
           ))}
         </ul>
+        <PortableComments />
       </div>
     </div>
   );

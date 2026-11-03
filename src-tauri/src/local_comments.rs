@@ -111,3 +111,64 @@ mod tests {
         );
     }
 }
+
+#[tauri::command]
+pub async fn texpile_comments(project_id: String, events: Option<Vec<serde_json::Value>>) -> Result<String, String> {
+    use std::io::{Read, Write};
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::paths::project_dir(&project_id)?;
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = root.join(".texpile");
+        if events.is_some() {
+            match std::fs::create_dir(&dir) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        if dir.exists() && dir.canonicalize().map_err(|error| error.to_string())? != dir {
+            return Err("Invalid Texpile metadata directory".into());
+        }
+        let path = dir.join("comments.jsonl");
+        let mut log = String::new();
+        match std::fs::symlink_metadata(&path) {
+            Ok(info) if info.is_file() => {
+                if path.canonicalize().map_err(|error| error.to_string())? != path {
+                    return Err("Invalid Texpile comment log".into());
+                }
+                std::fs::File::open(&path).map_err(|error| error.to_string())?
+                    .take((MAX_BYTES + 1) as u64).read_to_string(&mut log)
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            _ => return Err("Invalid Texpile comment log".into()),
+        }
+        if log.len() > MAX_BYTES {
+            return Err("Texpile comments exceed the size limit".into());
+        }
+        if let Some(events) = events {
+            let id = events.first().and_then(|event| event["id"].as_str()).ok_or("Missing comment ID")?;
+            let exists = log.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|event| event["t"] == "open" && event["id"].as_str() == Some(id));
+            if !exists {
+                let mut append = String::new();
+                if !log.is_empty() && !log.ends_with('\n') {
+                    append.push('\n');
+                }
+                for event in events {
+                    append.push_str(&event.to_string());
+                    append.push('\n');
+                }
+                if log.len() + append.len() > MAX_BYTES {
+                    return Err("Texpile comments exceed the size limit".into());
+                }
+                std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                    .and_then(|mut file| file.write_all(append.as_bytes()))
+                    .map_err(|error| error.to_string())?;
+                log.push_str(&append);
+            }
+        }
+        Ok(log)
+    }).await.map_err(|error| error.to_string())?
+}
